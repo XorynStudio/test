@@ -1,6 +1,3 @@
-# SPDX-FileCopyrightText: © 2024 Tiny Tapeout
-# SPDX-License-Identifier: Apache-2.0
-
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
@@ -8,33 +5,41 @@ from cocotb.triggers import ClockCycles
 
 @cocotb.test()
 async def test_project(dut):
-    dut._log.info("Start")
+    dut._log.info("Starting CHIMERA-1 Elastic CPU/GPU Silicon Verification")
 
-    # Set the clock period to 10 us (100 KHz)
-    clock = Clock(dut.clk, 10, unit="us")
+    # 50 MHz clock (20 ns period)
+    clock = Clock(dut.clk, 20, units="ns")
     cocotb.start_soon(clock.start())
 
-    # Reset
-    dut._log.info("Reset")
+    # Reset core
     dut.ena.value = 1
     dut.ui_in.value = 0
     dut.uio_in.value = 0
     dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 10)
+    await ClockCycles(dut.clk, 5)
     dut.rst_n.value = 1
+    await ClockCycles(dut.clk, 2)
 
-    dut._log.info("Test project behavior")
+    # 1. CPU Mode (FUSE): MOVI R0 = 5 (opcode=000, reg_sel=00, exec_strobe=1)
+    dut.uio_in.value = 5
+    dut.ui_in.value = 0b1_00_0_0_000
+    await ClockCycles(dut.clk, 2)
+    assert dut.uo_out.value == 5
 
-    # Set the input values you want to test
-    dut.ui_in.value = 20
-    dut.uio_in.value = 30
+    # 2. CPU Mode (FUSE): MOVI R1 = 3 (opcode=000, reg_sel=01, exec_strobe=1)
+    dut.uio_in.value = 3
+    dut.ui_in.value = 0b1_01_0_0_000
+    await ClockCycles(dut.clk, 2)
+    assert dut.uo_out.value == 3
 
-    # Wait for one clock cycle to see the output values
-    await ClockCycles(dut.clk, 1)
+    # 3. 1-Cycle Morph to GPU Mode (WAVE) + 2D Morton Swizzle (opcode=101, morph=1)
+    dut.ui_in.value = 0b1_00_0_1_101
+    await ClockCycles(dut.clk, 2)
+    assert dut.uo_out.value == 0x1F  # Morton interleaved address of X=5, Y=3
 
-    # The following assersion is just an example of how to check the output values.
-    # Change it to match the actual expected output of your module:
-    assert dut.uo_out.value == 50
+    # 4. Verify Hardware Z-Buffer Depth Test (ROP.ZWRITE, opcode=110)
+    dut.ui_in.value = 0b1_00_0_1_110
+    await ClockCycles(dut.clk, 2)
+    assert dut.uo_out.value == 3  # Shaded color in R1 committed!
 
-    # Keep testing the module by changing the input values, waiting for
-    # one or more clock cycles, and asserting the expected output values.
+    dut._log.info("CHIMERA-1 All Silicon Tests PASSED!")
