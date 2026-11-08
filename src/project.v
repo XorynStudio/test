@@ -18,75 +18,67 @@ module tt_um_xorynstudios_chimera (
     wire       exec_strobe   = ui_in[7];
     wire [3:0] imm_data      = uio_in[3:0];
 
-    // uio[3:0] = Inputs (0), uio[7:4] = Live Silicon Telemetry Outputs (1)
     assign uio_oe = 8'b1111_0000;
 
     reg        gpu_mode_q;
     reg  [1:0] active_wave_q;
-    reg  [7:0] sram_bank [0:3][0:3];
+    reg  [7:0] reg_a_q;
+    reg  [7:0] reg_b_q;
     reg  [7:0] z_buffer_q;
     reg        z_pass_flag_q;
     reg  [7:0] result_q;
 
-    // 0-Cycle Wavefront Switcher on L1 Cache Miss
+    // 0-Cycle Wavefront ID Switcher on L1 Cache Miss
     wire [1:0] next_wave = (gpu_mode_q && l1_miss_swap) ? (active_wave_q + 2'd1) : active_wave_q;
 
-    wire [7:0] op_a = sram_bank[next_wave][reg_sel];
-    wire [7:0] op_b = sram_bank[next_wave][(reg_sel + 2'd1) & 2'd3];
-    wire [7:0] op_c = sram_bank[next_wave][(reg_sel + 2'd2) & 2'd3];
-
-    // 2D Morton Z-Order Address Interleaver
+    // Hardware 2D Morton Z-Order Address Interleaver (X[3:0] = reg_a_q, Y[3:0] = reg_b_q)
     wire [7:0] morton_2d_addr = {
-        op_b[3], op_a[3], op_b[2], op_a[2],
-        op_b[1], op_a[1], op_b[0], op_a[0]
+        reg_b_q[3], reg_a_q[3],
+        reg_b_q[2], reg_a_q[2],
+        reg_b_q[1], reg_a_q[1],
+        reg_b_q[0], reg_a_q[0]
     };
 
-    integer w, r;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             gpu_mode_q    <= 1'b0;
             active_wave_q <= 2'd0;
+            reg_a_q       <= 8'h00;
+            reg_b_q       <= 8'h00;
             z_buffer_q    <= 8'hFF;
             z_pass_flag_q <= 1'b0;
             result_q      <= 8'h00;
-            for (w = 0; w < 4; w = w + 1) begin
-                for (r = 0; r < 4; r = r + 1) begin
-                    sram_bank[w][r] <= 8'h00;
-                end
-            end
         end else if (ena) begin
             gpu_mode_q    <= morph_wave_en;
             active_wave_q <= next_wave;
 
             if (exec_strobe) begin
                 case (opcode)
-                    3'b000: begin // MOVI
-                        sram_bank[next_wave][reg_sel] <= {4'h0, imm_data} + {6'h0, next_wave};
-                        result_q <= {4'h0, imm_data} + {6'h0, next_wave};
+                    3'b000: begin // MOVI into R0 (reg_sel=0) or R1 (reg_sel=1)
+                        if (reg_sel[0] == 1'b0) reg_a_q <= {4'h0, imm_data};
+                        else                    reg_b_q <= {4'h0, imm_data};
+                        result_q <= {4'h0, imm_data};
                     end
-                    3'b001: begin // ADD / VADD
-                        sram_bank[next_wave][reg_sel] <= op_a + op_b;
-                        result_q <= op_a + op_b;
+                    3'b001: begin // ADD
+                        result_q <= reg_a_q + reg_b_q;
                     end
-                    3'b010: begin // SUB / VSUB
-                        sram_bank[next_wave][reg_sel] <= op_a - op_b;
-                        result_q <= op_a - op_b;
+                    3'b010: begin // SUB
+                        result_q <= reg_a_q - reg_b_q;
                     end
-                    3'b011: begin // VFMA
-                        sram_bank[next_wave][reg_sel] <= (op_a[3:0] * imm_data) + op_c;
-                        result_q <= (op_a[3:0] * imm_data) + op_c;
+                    3'b011: begin // VFMA (reg_a * imm + reg_b)
+                        result_q <= (reg_a_q[3:0] * imm_data) + reg_b_q;
                     end
-                    3'b100: begin // VDOT2
-                        result_q <= (op_a[3:0] * op_b[3:0]) + (op_c[3:0] * imm_data);
+                    3'b100: begin // WAVE BANK READ
+                        result_q <= reg_a_q + {6'h0, next_wave};
                     end
-                    3'b101: begin // TEX2D / MORTON 2D
+                    3'b101: begin // TEX2D / 2D MORTON SWIZZLE
                         result_q <= morton_2d_addr;
                     end
-                    3'b110: begin // ROP.ZWRITE
-                        if (op_a < z_buffer_q) begin
-                            z_buffer_q    <= op_a;
+                    3'b110: begin // ROP.ZWRITE (Hardware Depth Test)
+                        if (reg_a_q < z_buffer_q) begin
+                            z_buffer_q    <= reg_a_q;
                             z_pass_flag_q <= 1'b1;
-                            result_q      <= op_b;
+                            result_q      <= reg_b_q;
                         end else begin
                             z_pass_flag_q <= 1'b0;
                         end
@@ -95,7 +87,7 @@ module tt_um_xorynstudios_chimera (
                         z_buffer_q    <= 8'hFF;
                         z_pass_flag_q <= 1'b0;
                         gpu_mode_q    <= 1'b0;
-                        result_q      <= op_a;
+                        result_q      <= 8'h00;
                     end
                 endcase
             end
@@ -104,6 +96,6 @@ module tt_um_xorynstudios_chimera (
 
     assign uo_out  = result_q;
     assign uio_out = {z_pass_flag_q, gpu_mode_q, active_wave_q, 4'b0000};
-    wire _unused = &{uio_in[7:4], 1'b0};
+    wire _unused = &{reg_sel[1], uio_in[7:4], 1'b0};
 
 endmodule
